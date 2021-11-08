@@ -81,6 +81,12 @@ const (
 	// ScopeReadWrite grants permissions to manage your
 	// data in Google Cloud Storage.
 	ScopeReadWrite = raw.DevstorageReadWriteScope
+
+	// defaultConnPoolSize is the default number of connections
+	// to initialize in the GAPIC gRPC connection pool. A larger
+	// connection pool may be necessary for jobs that require
+	// high throughput and/or leverage many concurrent streams.
+	defaultConnPoolSize = 4
 )
 
 var xGoogHeader = fmt.Sprintf("gl-go/%s gccl/%s", version.Go(), version.Repo)
@@ -100,7 +106,8 @@ type Client struct {
 	scheme string
 	// ReadHost is the default host used on the reader.
 	readHost string
-	creds    *google.Credentials
+	// May be nil.
+	creds *google.Credentials
 
 	// gc is an optional gRPC-based, GAPIC client.
 	//
@@ -131,14 +138,13 @@ func NewClient(ctx context.Context, opts ...option.ClientOption) (*Client, error
 		opts = append(opts, internaloption.WithDefaultEndpoint("https://storage.googleapis.com/storage/v1/"))
 		opts = append(opts, internaloption.WithDefaultMTLSEndpoint("https://storage.mtls.googleapis.com/storage/v1/"))
 
+		// Don't error out here. The user may have passed in their own HTTP
+		// client which does not auth with ADC or other common conventions.
 		c, err := transport.Creds(ctx, opts...)
-		if err != nil {
-			return nil, err
+		if err == nil {
+			creds = c
+			opts = append(opts, internaloption.WithCredentials(creds))
 		}
-		creds = c
-
-		opts = append(opts, internaloption.WithCredentials(creds))
-
 	} else {
 		var hostURL *url.URL
 
@@ -203,6 +209,8 @@ func newHybridClient(ctx context.Context, opts *hybridClientOptions) (*Client, e
 	if opts == nil {
 		opts = &hybridClientOptions{}
 	}
+	opts.GRPCOpts = append(defaultGRPCOptions(), opts.GRPCOpts...)
+
 	c, err := NewClient(ctx, opts.HTTPOpts...)
 	if err != nil {
 		return nil, err
@@ -215,6 +223,14 @@ func newHybridClient(ctx context.Context, opts *hybridClientOptions) (*Client, e
 	c.gc = g
 
 	return c, nil
+}
+
+// defaultGRPCOptions returns a set of the default client options
+// for gRPC client initialization.
+func defaultGRPCOptions() []option.ClientOption {
+	return []option.ClientOption{
+		option.WithGRPCConnectionPool(defaultConnPoolSize),
+	}
 }
 
 // Close closes the Client.
@@ -1444,7 +1460,7 @@ func newObjectFromProto(o *storagepb.Object) *ObjectAttrs {
 		Generation:              o.Generation,
 		Metageneration:          o.Metageneration,
 		StorageClass:            o.StorageClass,
-		CustomerKeySHA256:       o.GetCustomerEncryption().GetKeySha256(),
+		CustomerKeySHA256:       string(o.GetCustomerEncryption().GetKeySha256Bytes()),
 		KMSKeyName:              o.GetKmsKey(),
 		Created:                 convertProtoTime(o.GetCreateTime()),
 		Deleted:                 convertProtoTime(o.GetDeleteTime()),
